@@ -63,7 +63,8 @@
 unsigned int Freq = 0;  // Example: measured frequency value (global variable)
 unsigned int Res = 0;   // Example: measured resistance value (global variable)
 
-
+void ADC_setup();
+void DAC_setup();
 void oled_Write(unsigned char);
 void oled_Write_Cmd(unsigned char);
 void oled_Write_Data(unsigned char);
@@ -285,8 +286,11 @@ int main(int argc, char* argv[])
 {
 
 	SystemClock48MHz();
+	RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
 
+	RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;  /* Enable SYSCFG clock */
 
+	ADC_setup();
 
 	oled_config();
 
@@ -294,13 +298,69 @@ int main(int argc, char* argv[])
 	{
 
 
-		refresh_OLED();
+
+		// Start ADC conversion
+		    ADC1->CR |= (1U << 2);
+
+		    // Wait for conversion complete
+		    while (!(ADC1->ISR & (1U << 2)));
+
+		    // Read conversion result
+		    trace_printf("%d\n",(uint32_t)ADC1->DR);
 
 	}
 
 }
 
+//// DAC Setup
+///
+void DAC_setup(){
 
+
+
+
+}
+
+//// ADC Setup
+
+void ADC_setup(void)
+{
+
+
+
+
+    GPIOA->MODER &= ~(3U << 2);
+    GPIOA->MODER |=  (3U << 2);
+
+
+    GPIOA->PUPDR &= ~(3U << 2);
+
+
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+
+
+    ADC1->CR &= ~ADC_CR_ADEN;
+
+
+    ADC1->CR |= ADC_CR_ADCAL;
+
+
+    while (ADC1->CR & ADC_CR_ADCAL);
+
+
+    ADC1->CHSELR = ADC_CHSELR_CHSEL1;
+
+
+    ADC1->SMPR = (0U << 0);
+
+    ADC1->ISR = ADC_ISR_ADRDY;
+
+
+    ADC1->CR |= ADC_CR_ADEN;
+
+
+    while (!(ADC1->ISR & ADC_ISR_ADRDY));
+}
 
 //
 // LED Display Functions
