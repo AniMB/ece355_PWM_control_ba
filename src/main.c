@@ -64,10 +64,11 @@
 
 
 
-unsigned int Freq = 0;  // Example: measured frequency value (global variable)
-unsigned int Res = 0;   // Example: measured resistance value (global variable)
-volatile unsigned int tim_trig=0;
-volatile uint8_t button_state = 0;
+volatile unsigned int Freq = 0;  // Example: measured frequency value (global variable)
+volatile unsigned int Res = 0;   // Example: measured resistance value (global variable)
+unsigned int tim_trig1=0;
+unsigned int tim_trig2=0;
+volatile uint8_t button_state = 0x1;
 
 void ADC_setup();
 void DAC_setup();
@@ -307,12 +308,20 @@ int main(int argc, char* argv[])
 
 
 	ADC_setup();
+	DAC_setup();
+
+	myGPIOB_Init();
+	myTIM2_Init();
+	EXTI_Init();
+	EXTI_PA0_Init();
+
 
 	oled_config();
 
 	while (1) {
-		uint32_t count=start_adc();
-		run_dac(count);
+		Res=start_adc();
+		run_dac(Res);
+		refresh_OLED();
 	}
 }
 
@@ -340,7 +349,7 @@ void DAC_setup(){
 	 GPIOA->MODER |=  (3U << 8);
 	 GPIOA->PUPDR &= ~(3U << 9);
 
-	RCC->APB2ENR |= RCC_APB1ENR_DACEN;
+	RCC->APB1ENR |= RCC_APB1ENR_DACEN;
 	DAC->CR |= 0x1;
 
 }
@@ -462,34 +471,34 @@ void myGPIOB_Init()
 	/* Enable clock for GPIOB peripheral */
 	// Relevant register: RCC->AHBENR
 	RCC->AHBENR |=0x00040000;
-	/* Configure PB2 as input */
+	/* Configure PB2 & PB3 as input */
 	// Relevant register: GPIOB->MODER
-	GPIOB->MODER &= ~ 0x00000030;
-	/* Ensure no pull-up/pull-down for PB2 */
+	GPIOB->MODER &= ~ 0x000000F0;
+	/* Ensure no pull-up/pull-down for PB2 &PB3 */
 	// Relevant register: GPIOB->PUPDR
-	GPIOB->PUPDR &= ~0x00000030;
+	GPIOB->PUPDR &= ~0x000000F0;
 }
 
 
 
 void EXTI_Init(){
 
-	/* Map EXTI2 line to PB2 */
+	/* Map EXTI2 line to PB2 an PB3 */
 	// Relevant register: SYSCFG->EXTICR[0]
-	SYSCFG->EXTICR[0] &= ~0x00000F00;
-	SYSCFG->EXTICR[0] |= 0x00000100;
+	SYSCFG->EXTICR[0] &= ~0x0000FF00;
+	SYSCFG->EXTICR[0] |= 0x00001100;
 
-	/* EXTI2 line interrupts: set rising-edge trigger */
+	/* EXTI2 &EXTI3 line interrupts: set rising-edge trigger */
 	// Relevant register: EXTI->RTSR
-	EXTI->RTSR |= 0x00000004;
-	EXTI->FTSR &= ~0x00000004;
-	EXTI->PR =0x4;
+	EXTI->RTSR |= 0x0000000C;
+	EXTI->FTSR &= ~0x0000000C;
+	EXTI->PR =0xC;
 
-	/* Unmask interrupts from EXTI2 line */
+	/* Unmask interrupts from EXTI2 & EXTI3 line */
 	// Relevant register: EXTI->IMR
-	 EXTI->IMR |=0x00000004;
+	 EXTI->IMR |=0x0000000C;
 
-	/* Assign EXTI2 interrupt priority = 0 in NVIC */
+	/* Assign EXTI2 and EXTI3 interrupt priority = 0 in NVIC */
 	// Relevant register: NVIC->IP[2], or use NVIC_SetPriority
 	 NVIC_SetPriority(EXTI2_3_IRQn,0);
 
@@ -514,54 +523,72 @@ void TIM2_IRQHandler()
 		TIM2->CR1 |=0x00000001;
 	}
 }
+void freq(){
+	volatile uint32_t count=0;
+	volatile uint32_t frequency=0;
+	volatile unsigned int *tim_trig=button_state?&tim_trig2:&tim_trig1;
+
+				// 1. If this is the first edge:
+				if (*tim_trig==0){
+				//	- Clear count register (TIM2->CNT).
+					TIM2->CNT = 0x00000000;
+				//	- Start timer (TIM2->CR1).
+					TIM2->CR1 |=0x00000001;
+					*tim_trig=1;
+				}
+				//    Else (this is the second edge):
+				else{
+
+
+				//	- Stop timer (TIM2->CR1).
+					TIM2->CR1 &= ~0x00000001;
+				//	- Read out count register (TIM2->CNT).
+					count=TIM2->CNT;
+				//	- Calculate signal period and frequency.
+					Freq=	count!=0 ?(uint32_t)(48000000U/count) : 0;
+
+				//	- Print calculated values to the console.
+					trace_printf("Count=%u  Freq=%u Hz \n",(unsigned int) count, (unsigned int)frequency);
+					*tim_trig=0;
+				//	  NOTE: Function trace_printf does not work
+				//	  with floating-point numbers: you must use
+				//	  "unsigned int" type to print your signal
+				//	  period and frequency.
+				//
+				}
+
+}
 
 void EXTI2_3_IRQHandler()
 {
 	// Declare/initialize your local variables here...
-	volatile uint32_t count=0;
-	volatile uint32_t frequency=0;
 
 
 	/* Check if EXTI2 interrupt pending flag is indeed set */
 	if (!button_state){
 		if ((EXTI->PR & EXTI_PR_PR2) != 0)
 		{
-			//
-			// 1. If this is the first edge:
-			if (tim_trig==0){
-			//	- Clear count register (TIM2->CNT).
-				TIM2->CNT = 0x00000000;
-			//	- Start timer (TIM2->CR1).
-				TIM2->CR1 |=0x00000001;
-				tim_trig=1;
-			}
-			//    Else (this is the second edge):
-			else{
-
-
-			//	- Stop timer (TIM2->CR1).
-				TIM2->CR1 &= ~0x00000001;
-			//	- Read out count register (TIM2->CNT).
-				count=TIM2->CNT;
-			//	- Calculate signal period and frequency.
-				frequency=	count!=0 ?(uint32_t)(48000000U/count) : 0;
-
-			//	- Print calculated values to the console.
-				trace_printf("Count=%u  Freq=%u Hz \n",(unsigned int) count, (unsigned int)frequency);
-				tim_trig=0;
-			//	  NOTE: Function trace_printf does not work
-			//	  with floating-point numbers: you must use
-			//	  "unsigned int" type to print your signal
-			//	  period and frequency.
-			//
-			}
+			freq();
 			// 2. Clear EXTI2 interrupt pending flag (EXTI->PR).
 			// NOTE: A pending register (PR) bit is cleared
 			// by writing 1 to it.
-			EXTI->PR =0x4;
+			EXTI->PR |=EXTI_PR_PR2;
 			//
 		}
 	}
+	else if (button_state){
+			if ((EXTI->PR & EXTI_PR_PR3) != 0)
+			{
+				freq();
+				// 2. Clear EXTI2 interrupt pending flag (EXTI->PR).
+				// NOTE: A pending register (PR) bit is cleared
+				// by writing 1 to it.
+				EXTI->PR |=EXTI_PR_PR3;
+				//
+			}
+		}
+
+
 }
 
 void EXTI0_1_IRQHandler(void)
