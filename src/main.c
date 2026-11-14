@@ -55,6 +55,10 @@
 #pragma GCC diagnostic ignored "-Wreturn-type"
 
 
+#define myTIM2_PRESCALER ((uint16_t)0x0000)
+#define myTIM2_PERIOD ((uint32_t)0xFFFFFFFF)
+
+
 /*** This is partial code for accessing LED Display via SPI interface. ***/
 
 
@@ -62,9 +66,20 @@
 
 unsigned int Freq = 0;  // Example: measured frequency value (global variable)
 unsigned int Res = 0;   // Example: measured resistance value (global variable)
+volatile unsigned int tim_trig=0;
+volatile uint8_t button_state = 0;
 
 void ADC_setup();
 void DAC_setup();
+uint32_t start_adc();
+void run_dac(uint32_t count);
+
+void myGPIOB_Init();
+void myTIM2_Init();
+void EXTI_Init();
+void EXTI_PA0_Init();
+
+
 void oled_Write(unsigned char);
 void oled_Write_Cmd(unsigned char);
 void oled_Write_Data(unsigned char);
@@ -290,34 +305,43 @@ int main(int argc, char* argv[])
 
 	RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;  /* Enable SYSCFG clock */
 
+
 	ADC_setup();
 
 	oled_config();
 
-	while (1)
-	{
-
-
-
-		// Start ADC conversion
-		    ADC1->CR |= (1U << 2);
-
-		    // Wait for conversion complete
-		    while (!(ADC1->ISR & (1U << 2)));
-
-		    // Read conversion result
-		    trace_printf("%d\n",(uint32_t)ADC1->DR);
-
+	while (1) {
+		uint32_t count=start_adc();
+		run_dac(count);
 	}
+}
 
+void run_dac(uint32_t count){
+	DAC->DHR12R1=count;
+}
+
+uint32_t start_adc(){
+	// Start ADC conversion
+	    ADC1->CR |= (1U << 2);
+
+	    // Wait for conversion complete
+	    while (!(ADC1->ISR & (1U << 2)));
+	    uint32_t count=  (uint32_t)ADC1->DR;
+	    // Read conversion result
+	    trace_printf("%d\n",count);
+	    return count;
 }
 
 //// DAC Setup
 ///
 void DAC_setup(){
 
+	 GPIOA->MODER &= ~(3U << 8);
+	 GPIOA->MODER |=  (3U << 8);
+	 GPIOA->PUPDR &= ~(3U << 9);
 
-
+	RCC->APB2ENR |= RCC_APB1ENR_DACEN;
+	DAC->CR |= 0x1;
 
 }
 
@@ -365,6 +389,192 @@ void ADC_setup(void)
 //
 // LED Display Functions
 //
+void EXTI_PA0_Init(void)
+{
+    // Enable GPIOA clock
+    RCC->AHBENR |= RCC_AHBENR_GPIOAEN;
+
+    // Enable SYSCFG clock
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;
+
+    // Configure PA0 as input
+    GPIOA->MODER &= ~(3U << (0 * 2));
+
+    // Configure PA0 with pull-up
+    GPIOA->PUPDR &= ~(3U << (0 * 2));
+    GPIOA->PUPDR |=  (1U << (0 * 2));
+
+    // Map EXTI0 to GPIOA
+    SYSCFG->EXTICR[0] &= ~(0xFU << 0);
+
+    // Configure falling-edge trigger
+    EXTI->FTSR |= (1U << 0);
+    EXTI->RTSR &= ~(1U << 0);
+
+    // Clear pending interrupt flag
+    EXTI->PR = (1U << 0);
+
+    // Unmask EXTI0
+    EXTI->IMR |= (1U << 0);
+
+    // Set interrupt priority
+    NVIC_SetPriority(EXTI0_1_IRQn, 0);
+
+    // Enable interrupt in NVIC
+    NVIC_EnableIRQ(EXTI0_1_IRQn);
+}
+
+
+void myTIM2_Init()
+{
+	/* Enable clock for TIM2 peripheral */
+	// Relevant register: RCC->APB1ENR
+	RCC->APB1ENR |= 0x00000001;
+	/* Configure TIM2: buffer auto-reload, count up, stop on overflow,
+	 * enable update events, interrupt on overflow only */
+	// Relevant register: TIM2->CR1
+	TIM2->CR1 = 0x0000000C;
+
+	/* Set clock prescaler value */
+	TIM2->PSC = myTIM2_PRESCALER;
+	/* Set auto-reloaded delay */
+	TIM2->ARR = myTIM2_PERIOD;
+
+	/* Update timer registers */
+	// Relevant register: TIM2->EGR
+	TIM2->EGR = 0x00000001;
+
+	/* Assign TIM2 interrupt priority = 0 in NVIC */
+	// Relevant register: NVIC->IP[3], or use NVIC_SetPriority
+	NVIC_SetPriority(TIM2_IRQn,0);
+
+	/* Enable TIM2 interrupts in NVIC */
+	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
+	NVIC_EnableIRQ(TIM2_IRQn);
+
+	/* Enable update interrupt generation */
+	// Relevant register: TIM2->DIER
+	TIM2->DIER |= 0x00000001;
+}
+
+void myGPIOB_Init()
+{
+	/* Enable clock for GPIOB peripheral */
+	// Relevant register: RCC->AHBENR
+	RCC->AHBENR |=0x00040000;
+	/* Configure PB2 as input */
+	// Relevant register: GPIOB->MODER
+	GPIOB->MODER &= ~ 0x00000030;
+	/* Ensure no pull-up/pull-down for PB2 */
+	// Relevant register: GPIOB->PUPDR
+	GPIOB->PUPDR &= ~0x00000030;
+}
+
+
+
+void EXTI_Init(){
+
+	/* Map EXTI2 line to PB2 */
+	// Relevant register: SYSCFG->EXTICR[0]
+	SYSCFG->EXTICR[0] &= ~0x00000F00;
+	SYSCFG->EXTICR[0] |= 0x00000100;
+
+	/* EXTI2 line interrupts: set rising-edge trigger */
+	// Relevant register: EXTI->RTSR
+	EXTI->RTSR |= 0x00000004;
+	EXTI->FTSR &= ~0x00000004;
+	EXTI->PR =0x4;
+
+	/* Unmask interrupts from EXTI2 line */
+	// Relevant register: EXTI->IMR
+	 EXTI->IMR |=0x00000004;
+
+	/* Assign EXTI2 interrupt priority = 0 in NVIC */
+	// Relevant register: NVIC->IP[2], or use NVIC_SetPriority
+	 NVIC_SetPriority(EXTI2_3_IRQn,0);
+
+	/* Enable EXTI2 interrupts in NVIC */
+	// Relevant register: NVIC->ISER[0], or use NVIC_EnableIRQ
+	 NVIC_EnableIRQ(EXTI2_3_IRQn);
+}
+
+void TIM2_IRQHandler()
+{
+	/* Check if update interrupt flag is indeed set */
+	if ((TIM2->SR & TIM_SR_UIF) != 0)
+	{
+		trace_printf("\n*** Overflow! ***\n");
+
+		/* Clear update interrupt flag */
+		// Relevant register: TIM2->SR
+		TIM2->SR &= ~0x00000001;
+
+		/* Restart stopped timer */
+		// Relevant register: TIM2->CR1
+		TIM2->CR1 |=0x00000001;
+	}
+}
+
+void EXTI2_3_IRQHandler()
+{
+	// Declare/initialize your local variables here...
+	volatile uint32_t count=0;
+	volatile uint32_t frequency=0;
+
+
+	/* Check if EXTI2 interrupt pending flag is indeed set */
+	if (!button_state){
+		if ((EXTI->PR & EXTI_PR_PR2) != 0)
+		{
+			//
+			// 1. If this is the first edge:
+			if (tim_trig==0){
+			//	- Clear count register (TIM2->CNT).
+				TIM2->CNT = 0x00000000;
+			//	- Start timer (TIM2->CR1).
+				TIM2->CR1 |=0x00000001;
+				tim_trig=1;
+			}
+			//    Else (this is the second edge):
+			else{
+
+
+			//	- Stop timer (TIM2->CR1).
+				TIM2->CR1 &= ~0x00000001;
+			//	- Read out count register (TIM2->CNT).
+				count=TIM2->CNT;
+			//	- Calculate signal period and frequency.
+				frequency=	count!=0 ?(uint32_t)(48000000U/count) : 0;
+
+			//	- Print calculated values to the console.
+				trace_printf("Count=%u  Freq=%u Hz \n",(unsigned int) count, (unsigned int)frequency);
+				tim_trig=0;
+			//	  NOTE: Function trace_printf does not work
+			//	  with floating-point numbers: you must use
+			//	  "unsigned int" type to print your signal
+			//	  period and frequency.
+			//
+			}
+			// 2. Clear EXTI2 interrupt pending flag (EXTI->PR).
+			// NOTE: A pending register (PR) bit is cleared
+			// by writing 1 to it.
+			EXTI->PR =0x4;
+			//
+		}
+	}
+}
+
+void EXTI0_1_IRQHandler(void)
+{
+    if (EXTI->PR & (1U << 0))
+    {
+        // Toggle state
+        button_state ^= 1U;
+
+        // Clear interrupt pending flag
+        EXTI->PR = (1U << 0);
+    }
+}
 
 
 void refresh_OLED( void )
