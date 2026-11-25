@@ -6,6 +6,8 @@
 // ----------------------------------------------------------------------------
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
+#include "stm32f0xx_hal.h"
 #include "diag/Trace.h"
 #include "cmsis/cmsis_device.h"
 
@@ -67,8 +69,8 @@ volatile uint8_t button_state = 1;  // 1=PB3, 0=PB2
 volatile uint8_t first_edge = 1;
 volatile uint8_t measurement_ready = 0;
 
-volatile uint32_t milliseconds = 0;
-volatile uint32_t last_button_ms = 0;
+volatile uint16_t last_button_ms = 0;
+volatile uint8_t button_seen = 0;
 
 // Function declarations
 void SystemClock48MHz(void);
@@ -81,14 +83,16 @@ void myTIM2_Init(void);
 void EXTI_Init(void);
 void EXTI_PA0_Init(void);
 void freq(void);
+void TIM3_Init(void);
+void wait(uint32_t ms);
 
 void oled_Write(unsigned char);
-void oled_Write_Cmd(unsigned char)
-void oled_Write_Data(unsigned char)
+void oled_Write_Cmd(unsigned char);
+void oled_Write_Data(unsigned char);
 
 void oled_config(void);
 
-void refresh_OLED(void)
+void refresh_OLED(void);
 
 
 SPI_HandleTypeDef SPI_Handle;
@@ -263,6 +267,11 @@ unsigned char Characters[][8] = {
 // System clock: 48 MHz
 void SystemClock48MHz(void)
 {
+    RCC->CR |= RCC_CR_HSION;
+    while (!(RCC->CR & RCC_CR_HSIRDY));
+    RCC->CFGR &= ~RCC_CFGR_SW_Msk;
+    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_HSI);
+    FLASH->ACR |= FLASH_ACR_LATENCY;
     RCC->CR &= ~RCC_CR_PLLON;
 
     while (RCC->CR & RCC_CR_PLLRDY);
@@ -277,6 +286,7 @@ void SystemClock48MHz(void)
         (RCC->CFGR & ~RCC_CFGR_SW_Msk)
         | RCC_CFGR_SW_PLL;
 
+    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != RCC_CFGR_SWS_PLL);
     SystemCoreClockUpdate();
 }
 
@@ -428,7 +438,7 @@ void EXTI_PA0_Init(void)
     // Enable EXTI0
     EXTI->IMR |= (1U << 0);
 
-    NVIC_SetPriority(EXTI0_1_IRQn, 0);
+    NVIC_SetPriority(EXTI0_1_IRQn, 1);
     NVIC_EnableIRQ(EXTI0_1_IRQn);
 }
 
@@ -455,7 +465,7 @@ void freq(void)
         if (count != 0)
         {
             measured_count = count;
-            Freq = TIM2_CLOCK_HZ / count;
+            Freq = SystemClock48MHz / count;
             measurement_ready = 1;
         }
 
@@ -497,13 +507,14 @@ void EXTI0_1_IRQHandler(void)
         // Clear pending flag
         EXTI->PR = EXTI_PR_PR0;
 
-        uint32_t now = milliseconds;
+        uint16_t now = (uint16_t)TIM3->CNT;
 
         // Debounce button
-        if ((uint32_t)(now - last_button_ms)
+        if (!button_seen || (uint16_t)(now - last_button_ms)
             >= BUTTON_DEBOUNCE_MS)
         {
             last_button_ms = now;
+            button_seen = 1;
 
             // Toggle PB2 / PB3
             button_state ^= 1U;
@@ -534,11 +545,8 @@ int main(int argc, char *argv[])
 
     SystemClock48MHz();
 
-    // 1 ms SysTick
-    SysTick_Config(SystemCoreClock / 1000U);
-
-    // Allow the first button event immediately
-    last_button_ms = 0U - BUTTON_DEBOUNCE_MS;
+    // Start the free-running millisecond timer before enabling interrupts
+    TIM3_Init();
 
     ADC_setup();
     DAC_setup();
@@ -549,7 +557,7 @@ int main(int argc, char *argv[])
     EXTI_Init();
     EXTI_PA0_Init();
 
-    uint32_t last_print = 0;
+
 
     trace_printf("System Started\n");
     trace_printf("Initial Input: PB3\n");
@@ -558,6 +566,12 @@ int main(int argc, char *argv[])
 
     while (1)
     {
+        // Rearm debounce after the interval, before timer wraparound.
+        NVIC_DisableIRQ(EXTI0_1_IRQn);
+        if (button_seen && (uint16_t)((uint16_t)TIM3->CNT - last_button_ms) >= BUTTON_DEBOUNCE_MS)
+            button_seen = 0;
+        NVIC_EnableIRQ(EXTI0_1_IRQn);
+
         // Read potentiometer
         Res = start_adc();
 
@@ -587,7 +601,7 @@ int main(int argc, char *argv[])
             if (ready)
             {
                 trace_printf(
-                    "PB%u  Freq=%lu Hz Resistance=%lu ohms\n",
+                    "PB%u Count=%lu Freq=%lu Hz ADC=%lu\n",
                     selected ? 3U : 2U,
                     (unsigned long)count,
                     (unsigned long)frequency,
@@ -615,62 +629,76 @@ int main(int argc, char *argv[])
 void refresh_OLED( void )
 {
     // Buffer size = at most 16 characters per PAGE + terminating '\0'
-    unsigned char Buffer[17]; 
+    char Buffer[17]; 
 
-    snprintf( Buffer, sizeof( Buffer ), "R: %5u Ohms", Res );
+    snprintf( Buffer, sizeof( Buffer ), "ADC: %4lu", (unsigned long)Res );
     /* Buffer now contains your character ASCII codes for LED Display
        - select PAGE (LED Display line) and set starting SEG (column)
        - for each c = ASCII code = Buffer[0], Buffer[1], ...,
            send 8 bytes in Characters[c][0-7] to LED Display
     */
 
-    ...
+    oled_Write_Cmd(0xB2);
+    oled_Write_Cmd(0x00);
+    oled_Write_Cmd(0x10);
+    for (unsigned int i = 0; i < 16; i++) {
+        unsigned char c = i < strlen(Buffer) ? (unsigned char)Buffer[i] : ' ';
+        for (unsigned int j = 0; j < 8; j++)
+            oled_Write_Data(Characters[c][j]);
+    }
 
 
-    snprintf( Buffer, sizeof( Buffer ), "F: %5u Hz", Freq );
+
+    snprintf( Buffer, sizeof( Buffer ), "F: %8lu Hz", (unsigned long)Freq );
     /* Buffer now contains your character ASCII codes for LED Display
        - select PAGE (LED Display line) and set starting SEG (column)
        - for each c = ASCII code = Buffer[0], Buffer[1], ...,
            send 8 bytes in Characters[c][0-7] to LED Display
     */
 
-    ...
+    oled_Write_Cmd(0xB4);
+    oled_Write_Cmd(0x00);
+    oled_Write_Cmd(0x10);
+    for (unsigned int i = 0; i < 16; i++) {
+        unsigned char c = i < strlen(Buffer) ? (unsigned char)Buffer[i] : ' ';
+        for (unsigned int j = 0; j < 8; j++)
+            oled_Write_Data(Characters[c][j]);
+    }
 
 
 	/* Wait for ~100 ms (for example) to get ~10 frames/sec refresh rate 
        - You should use TIM3 to implement this delay (e.g., via polling)
     */
 
-    ...
+    wait(100);
 
 }
 
 
-void oled_Write_Cmd( unsigned char cmd )
+void oled_Write_Cmd(unsigned char cmd)
 {
-    ... // make PB8 = CS# = 1
-    ... // make PB9 = D/C# = 0
-    ... // make PB8 = CS# = 0
-    oled_Write( cmd );
-    ... // make PB8 = CS# = 1
+    GPIOB->BSRR = 1U << 8;
+    GPIOB->BSRR = 1U << (9 + 16);
+    GPIOB->BSRR = 1U << (8 + 16);
+    oled_Write(cmd);
+    GPIOB->BSRR = 1U << 8;
 }
 
-void oled_Write_Data( unsigned char data )
+void oled_Write_Data(unsigned char data)
 {
-    ... // make PB8 = CS# = 1
-    ... // make PB9 = D/C# = 1
-    ... // make PB8 = CS# = 0 
-    oled_Write( data );
-    ... // make PB8 = CS# = 1
+    GPIOB->BSRR = 1U << 8;
+    GPIOB->BSRR = 1U << 9;
+    GPIOB->BSRR = 1U << (8 + 16);
+    oled_Write(data);
+    GPIOB->BSRR = 1U << 8;
 }
-
 
 void oled_Write( unsigned char Value )
 {
 
     /* Wait until SPI2 is ready for writing (TXE = 1 in SPI2_SR) */
 
-    ...
+    while (!(SPI2->SR & SPI_SR_TXE));
 
     /* Send one 8-bit character:
        - This function also sets BIDIOE = 1 in SPI2_CR1
@@ -680,7 +708,8 @@ void oled_Write( unsigned char Value )
 
     /* Wait until transmission is complete (TXE = 1 in SPI2_SR) */
 
-    ...
+    while (!(SPI2->SR & SPI_SR_TXE));
+    while (SPI2->SR & SPI_SR_BSY);
 
 }
 
@@ -691,6 +720,13 @@ void oled_config( void )
 // Don't forget to enable GPIOB clock in RCC
 // Don't forget to configure PB13/PB15 as AF0
 // Don't forget to enable SPI2 clock in RCC
+    RCC->AHBENR|=RCC_AHBENR_GPIOBEN;
+
+    GPIOB->BSRR = (1U << 8) | (1U << 11);
+    GPIOB->MODER &= ~((3U << 16) | (3U << 18) | (3U << 22) | (3U << 26) | (3U << 30));
+    GPIOB->MODER |= (1U << 16) | (1U << 18) | (1U << 22) | (2U << 26) | (2U << 30);
+    GPIOB->AFR[1] &= ~((15U << 20) | (15U << 28));
+    RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
 
     SPI_Handle.Instance = SPI2;
 
@@ -719,7 +755,11 @@ void oled_config( void )
        - make pin PB11 = 0, wait for a few ms
        - make pin PB11 = 1, wait for a few ms
     */
-    ...
+    GPIOB->ODR &= ~(1U << 11);
+    wait(10);
+    GPIOB->ODR |= (1U << 11);
+    wait(10);
+
 
 
 //
@@ -737,12 +777,43 @@ void oled_config( void )
            call oled_Write_Data( 0x00 ) 128 times
     */
 
-    ...
+    // Select page addressing for the page commands below (SSD1306-compatible).
+    oled_Write_Cmd(0x20);
+    oled_Write_Cmd(0x02);
+    for (uint8_t page = 0; page < 8; page++) {
+        oled_Write_Cmd(0xB0 + page); 
+        oled_Write_Cmd(0x00);
+        
+        oled_Write_Cmd(0x10);
+        
+        for (uint8_t col = 0; col < 128; col++) {
+            oled_Write_Data(0x00); 
+            }
+        }
 
 
 }
 
 
+
+void TIM3_Init(void)
+{
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    TIM3->CR1 = 0;
+    TIM3->PSC = 48000U - 1U;
+    TIM3->ARR = 0xFFFFU;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CR1 = TIM_CR1_CEN;
+}
+
+void wait(uint32_t ms)
+{
+    while (ms--) {
+        uint16_t start = (uint16_t)TIM3->CNT;
+        while ((uint16_t)((uint16_t)TIM3->CNT - start) < 1U);
+    }
+}
 
 #pragma GCC diagnostic pop
 
