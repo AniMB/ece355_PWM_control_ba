@@ -81,6 +81,7 @@ void DAC_setup(void);
 uint32_t start_adc(void);
 void run_dac(uint32_t count);
 void myGPIOB_Init(void);
+void myGPIOC_Init(void);
 void myTIM2_Init(void);
 void EXTI_Init(void);
 void EXTI_PA0_Init(void);
@@ -371,6 +372,22 @@ void myGPIOB_Init(void)
     GPIOB->PUPDR &= ~0xF0U;
 }
 
+// Blinking LED GPIO Setup: PC8 and PC9
+void myGPIOC_Init()
+{
+	/* Enable clock for GPIOC peripheral */
+	RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
+
+	/* Configure PC8 and PC9 as outputs */
+	GPIOC->MODER |= (GPIO_MODER_MODER8_0 | GPIO_MODER_MODER9_0);
+	/* Ensure push-pull mode selected for PC8 and PC9 */
+	GPIOC->OTYPER &= ~(GPIO_OTYPER_OT_8 | GPIO_OTYPER_OT_9);
+	/* Ensure high-speed mode for PC8 and PC9 */
+	GPIOC->OSPEEDR |= (GPIO_OSPEEDER_OSPEEDR8 | GPIO_OSPEEDER_OSPEEDR9);
+	/* Ensure no pull-up/pull-down for PC8 and PC9 */
+	GPIOC->PUPDR &= ~(GPIO_PUPDR_PUPDR8 | GPIO_PUPDR_PUPDR9);
+}
+
 // TIM2 Setup
 void myTIM2_Init(void)
 {
@@ -523,6 +540,14 @@ void EXTI0_1_IRQHandler(void)
             // Toggle PB2 / PB3
             button_state ^= 1U;
 
+            /* Turn off currently blinking LED */
+			GPIOC->BRR = blinkingLED;
+			/* Switch blinking LED */
+			blinkingLED ^= ((uint16_t)0x0300);
+			/* Turn on switched LED */
+			GPIOC->BSRR = blinkingLED;
+            trace_printf("\nSwitching the blinking LED...\n");
+
             // Stop timer
             TIM2->CR1 &= ~TIM_CR1_CEN;
 
@@ -556,6 +581,7 @@ int main(int argc, char *argv[])
     DAC_setup();
 
     myGPIOB_Init();
+    myGPIOC_Init();
     myTIM2_Init();
 
     EXTI_Init();
