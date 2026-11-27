@@ -327,7 +327,7 @@ void ADC_setup(void)
 
 // ADC Conversion
 uint32_t start_adc(void)
-{   
+{
     // Clear EOC flag
     ADC1->ISR = ADC_ISR_EOC;
     // Start ADC conversion
@@ -587,6 +587,7 @@ int main(int argc, char *argv[])
     EXTI_Init();
     EXTI_PA0_Init();
 
+    GPIOC->BSRR = blinkingLED;
 
 
     trace_printf("System Started\n");
@@ -607,7 +608,7 @@ int main(int argc, char *argv[])
 
         // Output voltage through DAC
         run_dac(Res);
-        
+
         refresh_OLED();
 
         // Copy shared values safely
@@ -655,7 +656,7 @@ void refresh_OLED( void )
     // Buffer size = at most 16 characters per PAGE + terminating '\0'
     char Buffer[17];
 
-    snprintf( Buffer, sizeof( Buffer ), "R: %5u Ohms", Res*5000/4095);
+    snprintf( Buffer, sizeof( Buffer ), "R: %5u Ohms", (unsigned int )Res*5000/4095);
     /* Buffer now contains your character ASCII codes for LED Display
        - select PAGE (LED Display line) and set starting SEG (column)
        - for each c = ASCII code = Buffer[0], Buffer[1], ...,
@@ -666,7 +667,7 @@ void refresh_OLED( void )
     oled_Write_Cmd(0xB2);
     oled_Write_Cmd(0x08);
     oled_Write_Cmd(0x10);
-    
+
     for (unsigned int i = 0; i < 16; i++) {
         unsigned char c = i < strlen(Buffer) ? (unsigned char)Buffer[i] : ' ';
         for (unsigned int j = 0; j < 8; j++)
@@ -675,7 +676,7 @@ void refresh_OLED( void )
 
 
 
-    snprintf( Buffer, sizeof( Buffer ), "F: %5u Hz", Freq );
+    snprintf( Buffer, sizeof( Buffer ), "F: %5u Hz", (unsigned int)Freq );
     /* Buffer now contains your character ASCII codes for LED Display
        - select PAGE (LED Display line) and set starting SEG (column)
        - for each c = ASCII code = Buffer[0], Buffer[1], ...,
@@ -748,17 +749,9 @@ void oled_config( void )
 	GPIOB->BSRR = (1U << 8) | (1U << 11);
 
 	// Configure pins PB8, PB9, PB11 as output and PB13, PB15 as alternate function (AF0)
-    GPIOB->MODER &= ~((3U << 16) |
-	                  (3U << 18) |
-	                  (3U << 22) |
-	                  (3U << 26) |
+    GPIOB->MODER &= ~((3U << 16) | (3U << 18) |(3U << 22) |(3U << 26) |(3U << 30));
 
-	                  (3U << 30));
-
-	GPIOB->MODER |=  (1U << 16) |
-	                 (1U << 18) |
-	                 (1U << 22) |
-	                 (2U << 26) |
+	GPIOB->MODER |=  (1U << 16) |(1U << 18) |(1U << 22) | (2U << 26) |
 
 	                 (2U << 30);
     // Configure PB13 and PB15 as AF0 (SPI2) = 0000
@@ -801,7 +794,7 @@ void oled_config( void )
 
 
 //
-// Send initialization commands to LED Display 
+// Send initialization commands to LED Display
 //
     for ( unsigned int i = 0; i < sizeof( oled_init_cmds ); i++ )
     {
@@ -815,9 +808,9 @@ void oled_config( void )
            call oled_Write_Data( 0x00 ) 128 times
     */
 
-    // Select page addressing for the page commands below (SSD1306-compatible).
-    oled_Write_Cmd(0x20);
-    oled_Write_Cmd(0x02);
+    // Select page addressing for the page commands.
+    oled_Write_Cmd(0x0);
+    oled_Write_Cmd(0x0);
     for (uint8_t page = 0; page < 8; page++) {
         oled_Write_Cmd(0xB0 + page);
         oled_Write_Cmd(0x00);
