@@ -68,9 +68,11 @@ volatile uint32_t measured_count = 0;
 volatile uint8_t button_state = 1;  // 1=PB3, 0=PB2
 volatile uint8_t first_edge = 1;
 volatile uint8_t measurement_ready = 0;
-
+// Button debounce
 volatile uint16_t last_button_ms = 0;
 volatile uint8_t button_seen = 0;
+/* Indicating which LED is blinking */
+volatile uint16_t blinkingLED = ((uint16_t)0x0100);
 
 // Function declarations
 void SystemClock48MHz(void);
@@ -318,18 +320,20 @@ void ADC_setup(void)
     ADC1->ISR = ADC_ISR_ADRDY;
     ADC1->CR |= ADC_CR_ADEN;
 
+    // Wait for ADC to be ready
     while (!(ADC1->ISR & ADC_ISR_ADRDY));
 }
 
 // ADC Conversion
 uint32_t start_adc(void)
-{
+{   
+    // Clear EOC flag
     ADC1->ISR = ADC_ISR_EOC;
-
+    // Start ADC conversion
     ADC1->CR |= ADC_CR_ADSTART;
-
+    // Wait for conversion to complete
     while (!(ADC1->ISR & ADC_ISR_EOC));
-
+    // Return ADC value
     return ADC1->DR;
 }
 
@@ -531,7 +535,7 @@ void EXTI0_1_IRQHandler(void)
             measured_count = 0;
             Freq = 0;
 
-            // Clear old frequency input flags
+            // Clear old frequency input flags PB2/PB3
             EXTI->PR = 0xCU;
         }
     }
@@ -577,46 +581,40 @@ int main(int argc, char *argv[])
 
         // Output voltage through DAC
         run_dac(Res);
+        
+        refresh_OLED();
 
+        // Copy shared values safely
+        NVIC_DisableIRQ(EXTI0_1_IRQn);
+        NVIC_DisableIRQ(EXTI2_3_IRQn);
 
+        uint8_t selected = button_state;
+        uint8_t ready = measurement_ready;
+        uint32_t count = measured_count;
+        uint32_t frequency = Freq;
+        uint32_t adc = Res;
 
-       refresh_OLED();
+        NVIC_EnableIRQ(EXTI2_3_IRQn);
+        NVIC_EnableIRQ(EXTI0_1_IRQn);
 
-
-
-
-            // Copy shared values safely
-            NVIC_DisableIRQ(EXTI0_1_IRQn);
-            NVIC_DisableIRQ(EXTI2_3_IRQn);
-
-            uint8_t selected = button_state;
-            uint8_t ready = measurement_ready;
-            uint32_t count = measured_count;
-            uint32_t frequency = Freq;
-            uint32_t adc = Res;
-
-            NVIC_EnableIRQ(EXTI2_3_IRQn);
-            NVIC_EnableIRQ(EXTI0_1_IRQn);
-
-            if (ready)
-            {
-                trace_printf(
-                    "PB%u Count=%lu Freq=%lu Hz ADC=%lu\n",
-                    selected ? 3U : 2U,
-                    (unsigned long)count,
-                    (unsigned long)frequency,
-                    (unsigned long)adc
-                );
-            }
-            else
-            {
-                trace_printf(
-                    "PB%u Waiting for signal... ADC=%lu\n",
-                    selected ? 3U : 2U,
-                    (unsigned long)adc
-                );
-            }
-
+        if (ready)
+        {
+            trace_printf(
+                "PB%u Count=%lu Freq=%lu Hz ADC=%lu\n",
+                selected ? 3U : 2U,
+                (unsigned long)count,
+                (unsigned long)frequency,
+                (unsigned long)adc
+            );
+        }
+        else
+        {
+            trace_printf(
+                "PB%u Waiting for signal... ADC=%lu\n",
+                selected ? 3U : 2U,
+                (unsigned long)adc
+            );
+        }
     }
 }
 
@@ -638,9 +636,11 @@ void refresh_OLED( void )
            send 8 bytes in Characters[c][0-7] to LED Display
     */
 
+    // select PAGE 2 (LED Display line) and set starting SEG 8 (column)
     oled_Write_Cmd(0xB2);
     oled_Write_Cmd(0x08);
     oled_Write_Cmd(0x10);
+    
     for (unsigned int i = 0; i < 16; i++) {
         unsigned char c = i < strlen(Buffer) ? (unsigned char)Buffer[i] : ' ';
         for (unsigned int j = 0; j < 8; j++)
@@ -656,39 +656,36 @@ void refresh_OLED( void )
            send 8 bytes in Characters[c][0-7] to LED Display
     */
 
+    // select PAGE 4 (LED Display line) and set starting SEG 8 (column)
     oled_Write_Cmd(0xB4);
     oled_Write_Cmd(0x08);
     oled_Write_Cmd(0x10);
+
     for (unsigned int i = 0; i < 16; i++) {
         unsigned char c = i < strlen(Buffer) ? (unsigned char)Buffer[i] : ' ';
         for (unsigned int j = 0; j < 8; j++)
             oled_Write_Data(Characters[c][j]);
     }
 
-
-	/* Wait for ~100 ms (for example) to get ~10 frames/sec refresh rate
-       - You should use TIM3 to implement this delay (e.g., via polling)
-    */
-
+	// Wait for 100 ms to get 10 frames/sec refresh rate
     wait(100);
-
 }
 
 
 void oled_Write_Cmd(unsigned char cmd)
 {
-    GPIOB->BSRR = 1U << 8;
-    GPIOB->BSRR = 1U << (9 + 16);
-    GPIOB->BSRR = 1U << (8 + 16);
+    GPIOB->BSRR = 1U << 8; // Set PB8 high (not active)
+    GPIOB->BSRR = 1U << (9 + 16); // Set PB9 low D/C# = 0 (Command)
+    GPIOB->BSRR = 1U << (8 + 16); // Set PB8 low (active)
     oled_Write(cmd);
     GPIOB->BSRR = 1U << 8;
 }
 
 void oled_Write_Data(unsigned char data)
 {
-    GPIOB->BSRR = 1U << 8;
-    GPIOB->BSRR = 1U << 9;
-    GPIOB->BSRR = 1U << (8 + 16);
+    GPIOB->BSRR = 1U << 8; // Set PB8 high (not active)
+    GPIOB->BSRR = 1U << 9; // Set PB9 high D/C# = 1 (Data)
+    GPIOB->BSRR = 1U << (8 + 16); // Set PB8 low (active)
     oled_Write(data);
     GPIOB->BSRR = 1U << 8;
 }
@@ -724,7 +721,8 @@ void oled_config( void )
 
 	GPIOB->BSRR = (1U << 8) | (1U << 11);
 
-	GPIOB->MODER &= ~((3U << 16) |
+	// Configure pins PB8, PB9, PB11 as output and PB13, PB15 as alternate function (AF0)
+    GPIOB->MODER &= ~((3U << 16) |
 	                  (3U << 18) |
 	                  (3U << 22) |
 	                  (3U << 26) |
@@ -737,7 +735,7 @@ void oled_config( void )
 	                 (2U << 26) |
 
 	                 (2U << 30);
-
+    // Configure PB13 and PB15 as AF0 (SPI2) = 0000
 	GPIOB->AFR[1] &= ~((15U << 20) |  (15U << 28));
 
 	RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
@@ -777,7 +775,7 @@ void oled_config( void )
 
 
 //
-// Send initialization commands to LED Display
+// Send initialization commands to LED Display 
 //
     for ( unsigned int i = 0; i < sizeof( oled_init_cmds ); i++ )
     {
@@ -804,7 +802,6 @@ void oled_config( void )
             oled_Write_Data(0x00);
             }
         }
-
 
 }
 
